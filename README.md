@@ -25,11 +25,8 @@ This project explores and implements the full spectrum of RAG system design, cov
 
 ## Screenshots
 
-![alt text](image.png)
-
----
-
-![alt text](image-1.png)
+![Query Result](assets/screenshot1.png)
+![Source Chunks](assets/screenshot2.png)
 
 ---
 
