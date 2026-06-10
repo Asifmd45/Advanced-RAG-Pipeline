@@ -1,17 +1,22 @@
+import os
 from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
 
 load_dotenv()
 
-persistent_directory = "db/chroma_db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+persistent_directory = os.path.join(BASE_DIR, "db", "chroma_db")
 
 # Load embeddings and vector store
-embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
-
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True},
+)
 db = Chroma(
     persist_directory=persistent_directory,
     embedding_function=embedding_model,
@@ -21,7 +26,13 @@ db = Chroma(
 # Search for relevant documents
 query = "How much did Microsoft pay to acquire GitHub?"
 
-retriever = db.as_retriever(search_kwargs={"k": 5})
+retriever = db.as_retriever(
+    search_type="similarity_score_threshold",
+    search_kwargs={
+        "k": 5,
+        "score_threshold": 0.3  # Only return chunks with cosine similarity ≥ 0.3
+        }
+    )
 
 # retriever = db.as_retriever(
 #     search_type="similarity_score_threshold",
@@ -49,8 +60,11 @@ Documents:
 Please provide a clear, helpful answer using only the information from these documents. If you can't find the answer in the documents, say "I don't have enough information to answer that question based on the provided documents."
 """
 
-# Create a ChatOpenAI model
-model = ChatOpenAI(model="gpt-4o")
+# Create a ChatOllama model (QWEN > qwen2.5:1.5b)
+model = ChatOllama(
+    model="qwen2.5:1.5b",
+    temperature=0
+)
 
 # Define the messages for the model
 messages = [

@@ -1,0 +1,446 @@
+================================================================================
+                         RAG (Retrieval-Augmented Generation) NOTES
+                         For Revision — Concepts + Code Explained
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 1: WHAT IS RAG?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RAG = Retrieval-Augmented Generation
+
+Problem it solves:
+  - LLMs (like GPT) are trained on general data up to a cutoff date.
+  - They don't know about YOUR private documents or recent info.
+  - They can hallucinate (make up) answers.
+
+RAG solution:
+  - Instead of relying purely on the LLM's memory, we RETRIEVE relevant
+    chunks from our own documents and feed them to the LLM as context.
+  - The LLM then generates an answer BASED ON that retrieved context.
+
+Simple analogy:
+  - Without RAG: Asking a friend a question from memory (may be wrong).
+  - With RAG: Giving your friend the relevant book pages, then asking them.
+
+Full RAG Pipeline:
+  [Your Documents]
+       ↓
+  [Chunk & Embed → Store in Vector DB]   ← Done ONCE (Ingestion)
+       ↓
+  [User asks a question]
+       ↓
+  [Embed the question → Search Vector DB → Get relevant chunks]  ← Retrieval
+       ↓
+  [LLM reads chunks + question → Generates answer]  ← Generation
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2: KEY CONCEPTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── EMBEDDINGS ──
+  - A way to convert text into a list of numbers (a vector).
+  - Similar meaning → similar vectors → close together in vector space.
+  - Example: "car" and "automobile" will have very close vectors.
+  - We use the model: sentence-transformers/all-MiniLM-L6-v2
+    → Free, runs locally on CPU, fast, good enough for most RAG tasks.
+    → Produces 384-dimensional vectors.
+  - IMPORTANT: The SAME embedding model must be used at ingestion time
+    AND at retrieval time. Mixing models will give wrong results.
+
+── CHUNKING ──
+  - Documents can be very long. LLMs have limited context windows.
+  - We split documents into smaller "chunks" (e.g., 1000 characters each).
+  - Overlap: each chunk shares a few characters with the next chunk
+    (e.g., 25 characters). This avoids losing context at boundaries.
+  - Example: If a sentence starts at character 990 and ends at 1020,
+    overlap ensures it appears in BOTH chunk 1 and chunk 2.
+
+── VECTOR DATABASE (ChromaDB) ──
+  - A special database that stores embeddings (vectors).
+  - Supports fast "similarity search": given a query vector, find the
+    most similar stored vectors instantly.
+  - We use ChromaDB (local, file-based, no server needed).
+  - Data is saved to disk at: db/chroma_db/
+  - Distance metric used: COSINE similarity
+    → Measures the angle between two vectors (not their magnitude).
+    → Score of 1.0 = identical, 0.0 = completely unrelated.
+
+── COSINE SIMILARITY ──
+  - The standard metric for text similarity in RAG.
+  - Formula: cos(θ) = (A · B) / (|A| × |B|)
+  - Range: 0 to 1 (after normalization, which we enable).
+  - We use score_threshold=0.3 → only return results with similarity ≥ 0.3.
+
+── RETRIEVER ──
+  - A wrapper around the vector DB that accepts a query and returns
+    the top-k most relevant document chunks.
+  - Two common modes:
+      1. similarity        → always returns top k results
+      2. similarity_score_threshold → only returns results above a score cutoff
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3: FILE 1 — 1_ingestion_pipeline.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Build the knowledge base (run ONCE, or when docs change).
+
+FLOW:
+  docs/*.txt files
+      → load_documents()       : Read raw text files into Document objects
+      → split_documents()      : Break into 1000-char chunks (25-char overlap)
+      → create_vector_store()  : Embed each chunk & store in ChromaDB on disk
+
+────────────────────────────────────────────────────────────────────────────────
+FUNCTION: get_embedding_model()
+────────────────────────────────────────────────────────────────────────────────
+  Returns a HuggingFaceEmbeddings object.
+  Model: sentence-transformers/all-MiniLM-L6-v2
+  - device="cpu"              → runs without a GPU
+  - normalize_embeddings=True → scales vectors so cosine similarity works correctly
+
+  Code:
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+
+────────────────────────────────────────────────────────────────────────────────
+FUNCTION: load_documents(docs_path)
+────────────────────────────────────────────────────────────────────────────────
+  Reads all .txt files from the docs/ folder using LangChain's DirectoryLoader.
+  Each file becomes a Document object:
+    - doc.page_content → the full text of the file
+    - doc.metadata['source'] → the file path (e.g., docs/Tesla.txt)
+
+  Uses TextLoader with UTF-8 encoding to avoid character errors.
+  Prints a preview of the first 2 documents for verification.
+
+────────────────────────────────────────────────────────────────────────────────
+FUNCTION: split_documents(documents, chunk_size=1000, chunk_overlap=25)
+────────────────────────────────────────────────────────────────────────────────
+  Uses CharacterTextSplitter to break each document into chunks.
+  - chunk_size=1000    → each chunk is at most 1000 characters
+  - chunk_overlap=25   → consecutive chunks share 25 characters
+  Prints first 5 chunks so you can visually verify splits.
+
+  Why chunk? → LLMs have limited context windows. Smaller chunks also
+               allow more precise retrieval (only return what's relevant).
+
+────────────────────────────────────────────────────────────────────────────────
+FUNCTION: create_vector_store(chunks, persist_directory)
+────────────────────────────────────────────────────────────────────────────────
+  Embeds every chunk and stores them in ChromaDB.
+  Uses Chroma.from_documents() which:
+    1. Calls embedding_model.embed_documents() on each chunk
+    2. Stores (chunk_text, vector, metadata) in the DB
+    3. Saves to disk at persist_directory
+
+  collection_metadata={"hnsw:space": "cosine"} → tells Chroma to use
+  cosine similarity for all searches in this collection.
+
+────────────────────────────────────────────────────────────────────────────────
+FUNCTION: main()
+────────────────────────────────────────────────────────────────────────────────
+  Entry point. Has an important GUARD CHECK:
+
+    if os.path.exists(persistent_directory):
+        → skip ingestion, just load the existing DB and return
+
+  This means: run the script 10 times, it only ingests ONCE.
+  Delete the db/chroma_db/ folder to force a full re-ingestion.
+
+  Uses BASE_DIR (absolute path of the script file) for all paths,
+  so the script works correctly no matter which folder you run it from.
+
+LIBRARIES USED:
+  - langchain_community  → DirectoryLoader, TextLoader
+  - langchain_text_splitters → CharacterTextSplitter
+  - langchain_huggingface → HuggingFaceEmbeddings
+  - langchain_chroma → Chroma
+  - dotenv → load_dotenv (loads API keys from .env file if present)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 4: FILE 2 — 2_retrieval_pipeline.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Query the knowledge base. Depends on File 1 having been run first.
+
+FLOW:
+  User query (string)
+      → Embed the query using the same model
+      → Search ChromaDB for the most similar chunk vectors
+      → Return top matching Document chunks
+
+────────────────────────────────────────────────────────────────────────────────
+LOADING THE VECTOR STORE
+────────────────────────────────────────────────────────────────────────────────
+  Uses the same embedding model and same persist_directory as File 1.
+  Chroma(...) loads the existing DB from disk without re-indexing anything.
+
+  db = Chroma(
+      persist_directory=persistent_directory,
+      embedding_function=embedding_model,
+      collection_metadata={"hnsw:space": "cosine"}
+  )
+
+────────────────────────────────────────────────────────────────────────────────
+RETRIEVER — similarity_score_threshold mode
+────────────────────────────────────────────────────────────────────────────────
+  retriever = db.as_retriever(
+      search_type="similarity_score_threshold",
+      search_kwargs={
+          "k": 5,
+          "score_threshold": 0.3
+      }
+  )
+
+  - search_type="similarity_score_threshold"
+      → Only returns results WHERE cosine_similarity >= score_threshold
+      → If nothing passes the threshold, returns an empty list (no hallucination)
+
+  - k=5 → return at most 5 chunks
+
+  - score_threshold=0.3 → minimum relevance score required
+      → 0.3 is a low bar, good for recall (don't miss relevant results)
+      → Raise to 0.5–0.7 for higher precision (only very relevant results)
+
+  Alternative (simpler) retriever:
+    retriever = db.as_retriever(search_kwargs={"k": 5})
+    → Always returns top 5, regardless of relevance score.
+
+────────────────────────────────────────────────────────────────────────────────
+INVOKING THE RETRIEVER
+────────────────────────────────────────────────────────────────────────────────
+  relevant_docs = retriever.invoke(query)
+
+  What happens internally:
+    1. query string is passed to embedding_model.embed_query()
+    2. The resulting vector is compared against all stored vectors
+    3. ChromaDB returns the top-k chunks with highest cosine similarity
+    4. Chunks with similarity < score_threshold are filtered out
+
+  Output: a list of Document objects, each with:
+    - doc.page_content → the text of the chunk
+    - doc.metadata     → source file info
+
+LIBRARIES USED:
+  - langchain_chroma → Chroma
+  - langchain_huggingface → HuggingFaceEmbeddings
+  - dotenv → load_dotenv
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 5: HOW THE TWO FILES CONNECT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  File 1 (run once)          File 2 (run every query)
+  ──────────────────         ────────────────────────
+  docs/*.txt                 User question
+       ↓                          ↓
+  Load & Chunk              Embed question
+       ↓                          ↓
+  Embed chunks         →    Search db/chroma_db/
+       ↓                          ↓
+  Save to              ←    Return relevant chunks
+  db/chroma_db/
+
+  The db/chroma_db/ FOLDER is the bridge between them.
+  Both files MUST use the identical embedding model.
+  File 2 will FAIL (or return wrong results) if run before File 1.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 6: QUICK REFERENCE — COMMON THINGS TO CHANGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Change the query:
+    → Edit the `query = "..."` line in 2_retrieval_pipeline.py
+
+  Get more/fewer results:
+    → Change k=5 to any number in search_kwargs
+
+  Make results more/less strict:
+    → Increase score_threshold (e.g., 0.5) for higher precision
+    → Decrease score_threshold (e.g., 0.1) to get more results
+
+  Add new documents:
+    → Add .txt files to docs/
+    → Delete db/chroma_db/ folder
+    → Re-run 1_ingestion_pipeline.py
+
+  Change chunk size:
+    → Modify chunk_size in split_documents() in File 1
+    → Delete db/chroma_db/ and re-run File 1 to rebuild the index
+
+  Use GPU instead of CPU:
+    → Change device="cpu" to device="cuda" in get_embedding_model()
+    → Requires CUDA-enabled GPU and PyTorch with CUDA installed
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 7: SAMPLE QUERIES (from the commented list in File 2)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. "What was NVIDIA's first graphics accelerator called?"
+  2. "Which company did NVIDIA acquire to enter the mobile processor market?"
+  3. "What was Microsoft's first hardware product release?"
+  4. "How much did Microsoft pay to acquire GitHub?"
+  5. "In what year did Tesla begin production of the Roadster?"
+  6. "Who succeeded Ze'ev Drori as CEO in October 2008?"
+  7. "What was the name of the autonomous spaceport drone ship that
+      achieved the first successful sea landing?"
+  8. "What was the original name of Microsoft before it became Microsoft?"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 8: FILE 3 — 3_answer_generation.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE: Complete RAG by generating a final answer from retrieved context.
+
+FLOW:
+  User query
+      → Retrieve relevant chunks from ChromaDB
+      → Build one combined prompt (question + retrieved docs)
+      → Send to Ollama model via ChatOllama
+      → Print final answer
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT THIS FILE REUSES FROM FILE 2
+────────────────────────────────────────────────────────────────────────────────
+  - Same vector DB folder: db/chroma_db/
+  - Same embedding model: sentence-transformers/all-MiniLM-L6-v2
+  - Same cosine search config and retriever settings
+
+  Why this matters:
+    Retrieval quality depends on embedding consistency.
+    If embedding model changes between ingestion and retrieval, similarity
+    scores become unreliable.
+
+────────────────────────────────────────────────────────────────────────────────
+PROMPT CONSTRUCTION (combined_input)
+────────────────────────────────────────────────────────────────────────────────
+  The script creates a single string with:
+    1. The user question
+    2. All retrieved document chunks as bullet lines
+    3. A strict instruction:
+       - answer only from provided documents
+       - if info is missing, say not enough information
+
+  This is the "grounding" step that reduces hallucination.
+
+────────────────────────────────────────────────────────────────────────────────
+MODEL USED: ChatOllama
+────────────────────────────────────────────────────────────────────────────────
+  model = ChatOllama(
+      model="qwen2.5:1.5b",
+      temperature=0
+  )
+
+  - ChatOllama: LangChain wrapper for a local Ollama model.
+  - qwen2.5:1.5b: small local model, good for speed and learning.
+  - temperature=0: deterministic style output (more stable answers).
+
+────────────────────────────────────────────────────────────────────────────────
+MESSAGE FORMAT
+────────────────────────────────────────────────────────────────────────────────
+  messages = [
+      SystemMessage("You are a helpful assistant."),
+      HumanMessage(combined_input),
+  ]
+
+  - SystemMessage defines behavior.
+  - HumanMessage contains the grounded RAG prompt.
+  - model.invoke(messages) returns an AIMessage.
+  - result.content is the final answer text.
+
+────────────────────────────────────────────────────────────────────────────────
+EXPECTED OUTPUT BLOCKS
+────────────────────────────────────────────────────────────────────────────────
+  1. User Query: ...
+  2. --- Context ---
+     Retrieved chunks printed one by one
+  3. --- Generated Response ---
+     Final answer from Ollama
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 9: LOCAL OLLAMA SETUP + RUN CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP-BY-STEP (Windows + venv):
+  1. Activate venv:
+       .\.venv\Scripts\Activate.ps1
+  2. Install integration package:
+       python -m pip install langchain-ollama
+  3. Verify install:
+       python -m pip show langchain-ollama
+  4. Ensure Ollama app/service is running
+  5. Pull model (first time only):
+       ollama pull qwen2.5:1.5b
+  6. Optional quick model test:
+       ollama run qwen2.5:1.5b "hi"
+  7. Run script:
+       python .\RAG_Learning\3_answer_generation.py
+
+STATUS so far:
+  - langchain-ollama installed in .venv
+  - 3_answer_generation.py runs successfully end-to-end
+
+────────────────────────────────────────────────────────────────────────────────
+COMMON ISSUES + FIXES
+────────────────────────────────────────────────────────────────────────────────
+  1. Error: module not found (langchain_ollama)
+     Fix: install inside active venv:
+          python -m pip install langchain-ollama
+
+  2. Error: cannot connect to Ollama / connection refused
+     Fix:
+       - Start Ollama desktop app/service
+       - Retry command
+
+  3. Error: model not found
+     Fix:
+       - Run: ollama pull qwen2.5:1.5b
+
+  4. Retrieval returns no context
+     Cause:
+       - score_threshold too high OR weak query similarity
+     Fix:
+       - lower threshold (example 0.2) or improve query wording
+
+  5. Irrelevant retrieval quality
+     Check:
+       - same embedding model used in ingestion and retrieval
+       - re-ingest docs if chunking/model changed
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 10: HOW FILES 1 + 2 + 3 WORK TOGETHER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  File 1: 1_ingestion_pipeline.py
+    Build vector DB from docs (one-time or when docs change)
+
+  File 2: 2_retrieval_pipeline.py
+    Retrieve top relevant chunks for a query
+
+  File 3: 3_answer_generation.py
+    Use retrieved chunks as grounded context and generate final answer
+
+  Complete end-to-end RAG path:
+    docs/*.txt
+      → chunk + embed + store
+      → retrieve relevant chunks
+      → generate grounded answer
+
+
+================================================================================
+                         (More files will be added as we progress)
+================================================================================

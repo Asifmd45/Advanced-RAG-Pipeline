@@ -1,11 +1,27 @@
 import os
 from langchain_community.document_loaders import TextLoader, DirectoryLoader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 
+# Load values from .env (if present) before any model/database setup.
 load_dotenv()
+
+# Absolute path of this script file. This prevents path issues when running the
+# script from a different current working directory.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def get_embedding_model(device="cpu"):
+    """Return the embedding model used for both indexing and retrieval."""
+    # This model converts text chunks into vectors (embeddings) for similarity
+    # search in Chroma.
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True},
+    )
 
 def load_documents(docs_path="docs"):
     """Load all text files from the docs directory"""
@@ -19,7 +35,8 @@ def load_documents(docs_path="docs"):
     loader = DirectoryLoader(
         path=docs_path,
         glob="*.txt",
-        loader_cls=TextLoader
+        loader_cls=TextLoader,
+        loader_kwargs={'encoding': 'utf-8'}
     )
     
     documents = loader.load()
@@ -27,7 +44,7 @@ def load_documents(docs_path="docs"):
     if len(documents) == 0:
         raise FileNotFoundError(f"No .txt files found in {docs_path}. Please add your company documents.")
     
-   
+    # Quick preview so you can verify correct files are loaded.
     for i, doc in enumerate(documents[:2]):  # Show first 2 documents
         print(f"\nDocument {i+1}:")
         print(f"  Source: {doc.metadata['source']}")
@@ -37,7 +54,7 @@ def load_documents(docs_path="docs"):
 
     return documents
 
-def split_documents(documents, chunk_size=1000, chunk_overlap=0):
+def split_documents(documents, chunk_size=1000, chunk_overlap=25):
     """Split documents into smaller chunks with overlap"""
     print("Splitting documents into chunks...")
     
@@ -48,6 +65,7 @@ def split_documents(documents, chunk_size=1000, chunk_overlap=0):
     
     chunks = text_splitter.split_documents(documents)
     
+    # Preview a few chunks for debugging and understanding chunk boundaries.
     if chunks:
     
         for i, chunk in enumerate(chunks[:5]):
@@ -66,10 +84,10 @@ def split_documents(documents, chunk_size=1000, chunk_overlap=0):
 def create_vector_store(chunks, persist_directory="db/chroma_db"):
     """Create and persist ChromaDB vector store"""
     print("Creating embeddings and storing in ChromaDB...")
-        
-    embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+
+    embedding_model = get_embedding_model(device="cpu")
     
-    # Create ChromaDB vector store
+    # Build and persist the vector index from all chunks.
     print("--- Creating vector store ---")
     vectorstore = Chroma.from_documents(
         documents=chunks,
@@ -86,15 +104,15 @@ def main():
     """Main ingestion pipeline"""
     print("=== RAG Document Ingestion Pipeline ===\n")
     
-    # Define paths
-    docs_path = "docs"
-    persistent_directory = "db/chroma_db"
+    # Project-local paths (safe even if script is run from another folder).
+    docs_path = os.path.join(BASE_DIR, "docs")
+    persistent_directory = os.path.join(BASE_DIR, "db", "chroma_db")
     
-    # Check if vector store already exists
+    # If an index already exists, reuse it to avoid re-ingesting everything.
     if os.path.exists(persistent_directory):
         print("✅ Vector store already exists. No need to re-process documents.")
-        
-        embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+
+        embedding_model = get_embedding_model(device="cpu")
         vectorstore = Chroma(
             persist_directory=persistent_directory,
             embedding_function=embedding_model, 
@@ -105,23 +123,21 @@ def main():
     
     print("Persistent directory does not exist. Initializing vector store...\n")
     
-    # Step 1: Load documents
+    # Step 1: Read source documents from docs/.
     documents = load_documents(docs_path)  
 
-    # Step 2: Split into chunks
+    # Step 2: Chunk documents for better retrieval granularity.
     chunks = split_documents(documents)
     
-    # # Step 3: Create vector store
+    # Step 3: Embed chunks and store them in Chroma DB.
     vectorstore = create_vector_store(chunks, persistent_directory)
     
     print("\n✅ Ingestion complete! Your documents are now ready for RAG queries.")
     return vectorstore
 
 if __name__ == "__main__":
+    # Entry point when you run: python 1_ingestion_pipeline.py
     main()
-
-
-
 
 # documents = [
 #    Document(

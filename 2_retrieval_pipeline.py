@@ -1,13 +1,20 @@
+import os
 from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 
 load_dotenv()
 
-persistent_directory = "db/chroma_db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+persistent_directory = os.path.join(BASE_DIR, "db", "chroma_db")
 
 # Load embeddings and vector store
-embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True},
+)
+
 
 db = Chroma(
     persist_directory=persistent_directory,
@@ -16,17 +23,15 @@ db = Chroma(
 )
 
 # Search for relevant documents
-query = "How much did Microsoft pay to acquire GitHub?"
+query = "In what year did Tesla begin production of the Roadster?"
 
-retriever = db.as_retriever(search_kwargs={"k": 5})
-
-# retriever = db.as_retriever(
-#     search_type="similarity_score_threshold",
-#     search_kwargs={
-#         "k": 5,
-#         "score_threshold": 0.3  # Only return chunks with cosine similarity ≥ 0.3
-#     }
-# )
+retriever = db.as_retriever(
+    search_type="similarity_score_threshold",
+    search_kwargs={
+        "k": 5,
+        "score_threshold": 0.3  # Only return chunks with cosine similarity ≥ 0.3
+        }
+    )
 
 relevant_docs = retriever.invoke(query)
 
